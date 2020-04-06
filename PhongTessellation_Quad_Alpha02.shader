@@ -13,7 +13,7 @@ Shader "Custom/PhongTessellation_Quad_Alpha02"
 		_MainTex("Main Texture", 2D) = "white" {}
 		_NormalTex("Normalmap", 2D) = "bump" {}
 		_DispTex("Disp Texture", 2D) = "gray" {}
-		_Displacement("Displacement", Range(0, 1.0)) = 0.3
+		_MaxDisplacement("Max Displacement", Range(0, 1.0)) = 0.3
 		_SubdivisionAmount("Subivision Amount", Range(1, 5)) = 1
 		_Color("Color", Color) = (1,1,1,1)
 		_Metallic("Metallic", Range(0, 1)) = 1
@@ -23,12 +23,9 @@ Shader "Custom/PhongTessellation_Quad_Alpha02"
 
 	SubShader
 	{
-		//Tags { "RenderType" = "Opaque" }
-
 		Pass
 		{
 			Tags {"LightMode" = "Deferred"}
-			//_LOD_ 300
 
 			CGPROGRAM
 			#pragma vertex vertex_shader
@@ -38,6 +35,7 @@ Shader "Custom/PhongTessellation_Quad_Alpha02"
 			#pragma multi_compile ___ UNITY_HDR_ON
 			//#pragma exclude_renderers nomrt
 			#pragma target 4.6
+			#pragma glsl
 
 			//#define UNITY_PASS_DEFERRED
 			#include "UnityPBSLighting.cginc"
@@ -51,7 +49,7 @@ Shader "Custom/PhongTessellation_Quad_Alpha02"
 			uniform sampler2D _LightBuffer;
 
 			int _SubdivisionAmount;
-			float _Displacement;
+			float _MaxDisplacement;
 
 			float4 _Color;
 			float _Metallic;
@@ -62,13 +60,14 @@ Shader "Custom/PhongTessellation_Quad_Alpha02"
 			SamplerState sampler_MainTex;
 			uniform float4 _MainTex_ST;
 			uniform float4 _NormalTex_ST;
+			uniform float4 _DispTex_ST;
 			
 			float2 uv_MainTex;
 
 			sampler2D _NormalTex;
 			SamplerState sampler_NormalTex;
 
-			Texture2D _DispTex;
+			sampler2D _DispTex;
 			SamplerState sampler_DispTex;
 
 			//struct Input 
@@ -196,32 +195,50 @@ Shader "Custom/PhongTessellation_Quad_Alpha02"
 				float3 phong_a = lerp(c0, c1, UV.x);
 				float3 phong_b = lerp(c3, c2, UV.x);
 
+				// We use this to sample the displacement map.
 				float3 phongNew = lerp(newPosition, lerp(phong_a, phong_b, UV.y), 0.75 /* alpha parameter, default = 3/4 */);
-
-				//output.posworld = mul(phongNew, (float3x3) UNITY_MATRIX_M);
 				// Works better in here than in vertex shader.
-				output.position = UnityObjectToClipPos(float4(phongNew, 1));
-
-				//output.position = float4(mul((float3x3)UNITY_MATRIX_IT_MV, phongNew), 1);
-
-				// Only works if bump map is Texture2D
-				//float3 pNormal =_NormalTex.SampleLevel( sampler_NormalTex, uv, 0).rgb;
-
+				// If we don't want to use a displacement map we just use this and comment out the vertex displacement below.
+				//output.position = UnityObjectToClipPos(float4(phongNew, 1));
 
 				// Bilinear interpolation of normals.
 				float3 normal_a = lerp(patch[0].normal, patch[1].normal, UV.x);
 				float3 normal_b = lerp(patch[3].normal, patch[2].normal, UV.x);
 				
+				// Output Data.
 				output.normal = lerp(normal_a, normal_b, UV.y);
-				//output.normal = normalize(output.normal);
-				//output.normal = normalize(mul(output.normal, (float3x3) UNITY_MATRIX_M));
-				output.normal = UnityObjectToWorldNormal(output.normal);
+				//output.normal = UnityObjectToWorldNormal(output.normal);
 
 				// Bilinear interpolation of Texcoords/UV's
 				float2 uv_a = lerp(patch[0].uv, patch[1].uv, UV.x);
 				float2 uv_b = lerp(patch[3].uv, patch[2].uv, UV.x);
 
 				output.texcoord = lerp(uv_a, uv_b, UV.y);
+
+				// This kinda works?
+				//float3 disp = _DispTex.SampleLevel(sampler_DispTex, output.texcoord, 0).rgb * _Displacement;
+
+				// Get Colour from displacement map, and convert to float from 0 to _MaxDisplacement.
+				float4 dispTexColour = tex2Dlod(_DispTex, float4(output.texcoord, 0.0, 0.0));
+				float displacement = dot(float3(0.21, 0.72, 0.07), dispTexColour.rgb) * _MaxDisplacement;
+
+				// Displace vertices along surface normal vector.
+				float3 newVertexPos = phongNew + float4(output.normal * displacement, 0.0);
+
+				// Output data.
+				output.position = UnityObjectToClipPos(float4(newVertexPos, 1));
+				output.normal = UnityObjectToWorldNormal(output.normal);
+
+
+				// Trash
+				//output.position.xyz += UnityObjectToClipPos(newVertexPos.xyz);//UnityObjectToClipPos(newVertexPos +phongNew);
+				//output.position.xyz += newVertexPos.xyz;
+				//dispTexColour =  UnityObjectToClipPos(dispTexColour);
+				//float displacement = dot(float3(0.21, 0.72, 0.07), dispTexColour.rgb) * _Displacement;
+				//float displacement =  //dot(output.normal.xyz, dispTexColour.rgb) * _Displacement;
+				//float displacement = (dispTexColour.r * output.normal.x + dispTexColour.g * output.normal.y + dispTexColour.b * output.normal.z);
+				//output.position.xyz +=  displacement * _Displacement;
+				//output.position.xyz = UnityObjectToClipPos(output.position.xyz);
 
 				return output;
 
@@ -232,6 +249,31 @@ Shader "Custom/PhongTessellation_Quad_Alpha02"
 			//{
 			//	return float4(1.0,0.0,0.0,1.0);
 			//}
+
+			float _Distortion;
+			float _Power;
+			float _Scale;
+
+			inline float4 LightingStandardTranslucent(SurfaceOutputStandard s, float3 viewDir, UnityGI gi)
+			{
+				// Original colour.
+				float4 pbr = LightingStandard(s, viewDir, gi);
+				//float4 pbr = ps.albedo;
+
+				// Calculate intensity of backlight (light translucent)
+				//float i = 
+
+				float3 L = gi.light.dir;
+				float3 V = viewDir;
+				float3 N = s.Normal;
+
+				float3 H = normalize(L + N * _Distortion);
+				float I = pow(saturate(dot(V, -H)), _Power) * _Scale;
+
+				// Final add
+				pbr.rgb = pbr.rgb + gi.light.color * I;
+				return pbr;
+			}
 
 			float3 ProcessEmission(float3 colourInput)
 			{
@@ -247,13 +289,19 @@ Shader "Custom/PhongTessellation_Quad_Alpha02"
 
 			structurePS pixel_shader(DS_OUTPUT input) : SV_Target
 			{
+				SurfaceOutputStandard o;
 				structurePS deferredStruct;
 				deferredStruct.albedo = tex2D(_MainTex, input.texcoord);//  *_Color;
 				//deferredStruct.albedo = tex2D(_LightBuffer, input.texcoord);
 				deferredStruct.albedo.a = 1;
 
+				UnityGI gi;
+				//deferredStruct.albedo = LightingStandardTranslucent(o, float3(1,0,0), gi);
+				//deferredStruct.albedo.a = 1;
+
 				// Specular.
-				deferredStruct.specular = float4(1,1,1,1);//float4(1, 1, 1, 1);
+				//deferredStruct.specular = float4(1,1,1,1);//float4(1, 1, 1, 1);
+				deferredStruct.specular = float4(float3(1,1,1), _Gloss);
 				//deferredStruct.emission = float4(1, 1, 1, 1);
 
 				// Normal.
